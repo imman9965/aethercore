@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "339611448491",
+    "project_id": "aethercore-37150",
+    "storage_bucket": "aethercore-37150.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:339611448491:android:89eb167bdb6b38ee8833ee",
+        "android_client_info": {
+          "package_name": "com.example.aethercore"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB69jSViG6dGVANxCVMEQLm6EG8L-VE9U0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
