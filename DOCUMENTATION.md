@@ -150,7 +150,8 @@ aethercore/
 │   ├── app/
 │   │   ├── app.dart                  Theme + design tokens.
 │   │   ├── auth_gate.dart            Splash + anonymous sign-in gate.
-│   │   └── home_screen.dart          Single-screen composition.
+│   │   ├── home_screen.dart          Hero composition (boss + raid + chat preview).
+│   │   └── chat_screen.dart          Dedicated full-screen typing experience.
 │   │
 │   └── features/
 │       ├── auth/
@@ -369,7 +370,9 @@ via the `Injector`, not on the facade.
 
 ### 7.4 Engagement Chat
 
-Bounded, sharded, real-time. Two flows: receiving and sending.
+Bounded, sharded, real-time. Two flows: receiving and sending — plus
+a two-screen UX that keeps the home layout uncluttered and gives the
+keyboard a dedicated workspace.
 
 **Receive.** `FirestoreChatRepository.watchRecent(forUserId)` opens a
 snapshot listener on the shard's `messages` sub-collection with
@@ -377,22 +380,50 @@ snapshot listener on the shard's `messages` sub-collection with
 cost-control surface: a session's read budget is bounded regardless
 of total message volume.
 
-**Send.** `SendMessage.call(uid, text)` validates the text
-(non-empty, ≤ 280 characters) in the use case layer, returns an
-`Err(ValidationFailure)` on rejection, otherwise delegates to
-`ChatRepository.send()` which appends a new document to the shard.
+**Send — WhatsApp-style optimistic.** Tapping send (or hitting enter)
+clears the input *immediately* and dispatches the write through
+`unawaited(_dispatchSend(text))`. There is no loading spinner and no
+disabled state; the user can keep typing the next message right away.
+The new bubble arrives via the Firestore stream within a few hundred
+milliseconds and slides in via the auto-scroll path. If the write
+fails, the text is restored to the input (with cursor at end) and an
+inline error banner appears for retry. The actual validation
+(non-empty, ≤ 280 chars) runs in `SendMessage.call` and returns
+`Err(ValidationFailure)` if the text is rejected — never thrown
+across layers.
 
-The "shard" layer is wired but currently set to a single global
-shard. To scale, raise `_shardCount` in `FirestoreChatRepository` and
-replace `_shardFor` with a true hash-bucket — see
-[Section 14, cost optimization](#14-cost-optimization).
+**Auto-scroll on new messages.** `ChatBox` tracks the previous
+message count. On the first stream emission, it `jumpTo`s the bottom
+so the user lands on the latest messages without a scroll animation.
+On every subsequent growth (your message OR a teammate's), it
+`animateTo`s `maxScrollExtent` over 220 ms inside a
+`WidgetsBinding.addPostFrameCallback` so the scroll target reflects
+the just-rendered new bubble.
 
-The chat input has an **animated rotating gradient border** powered
-by a `SweepGradient` and a `SingleTickerProviderStateMixin`-driven
-`AnimationController`. The animation rebuilds only the outer
+**Two-screen pattern.** The home screen renders `ChatBox` with
+`onComposerTap` set, which swaps the real input for a "Tap to write a
+message…" pill. Tapping the pill pushes
+`ChatScreen.route(injector: ..., userId: ...)` — a dedicated screen
+that has its own `Scaffold` with `resizeToAvoidBottomInset: true`,
+its own `BossCountdownController`, and a 56-px gradient status bar
+at the top showing the live boss countdown + raid count + inline
+Join button. This structurally fixes the keyboard-overlap problem:
+on the typing screen the chat owns the entire screen except for the
+status bar, so the composer rides up cleanly with the keyboard.
+
+**Animated rotating gradient border on the input.** The actual chat
+input is wrapped in `_AnimatedGradientField`, which renders a 2 px
+ring driven by a `SweepGradient` and a
+`SingleTickerProviderStateMixin`-backed `AnimationController` spinning
+once every 3 seconds. The animation rebuilds only the outer
 container's `BoxDecoration` each frame; the `TextField` subtree is
 cached via `AnimatedBuilder`'s `child` parameter, so it rebuilds zero
 times per tick.
+
+**Sharding lever.** The shard layer is wired but currently set to a
+single global shard. To scale, raise `_shardCount` in
+`FirestoreChatRepository` and replace `_shardFor` with a true
+hash-bucket — see [Section 14, cost optimization](#14-cost-optimization).
 
 ---
 
@@ -422,6 +453,12 @@ HomeScreen.initState
        ├── subscribes events/world_boss
        └── Timer.periodic(100ms) ticking ValueNotifier<Duration>
 
+HomeScreen.initState
+  ↓ Caches AppBar + WorldBossTimer + RaidJoinButton + ChatBox in
+    instance fields so build() never re-creates them.
+  ↓ Each child is wrapped in RepaintBoundary so a repaint inside
+    one never invalidates the others' compositor layers.
+
 HomeScreen.build
   ├── WorldBossTimer(remaining: notifier)
   │     └── RepaintBoundary > ValueListenableBuilder > digits text
@@ -434,10 +471,30 @@ HomeScreen.build
   │                  ↓ _raidRef.update({slots_filled: + 1})
   │                  ↓ _joinerRef.set({userId, joinedAt})
   │                  ↓ turn.complete()  releases next caller
-  └── ChatBox(watchChat, sendMessage, userId)
+  └── ChatBox(watchChat, sendMessage, userId,
+              onComposerTap: _openChatScreen)
         ├── StreamBuilder over limitToLast(50)
-        ├── animated-gradient TextField input
-        └── send: SendMessage → validate → ChatRepository.send
+        ├── auto-scroll: jumpTo on first batch, animateTo on growth
+        └── tap pill ("Tap to write a message…")
+              ↓
+              Navigator.push(ChatScreen.route(...))
+
+ChatScreen
+  ├── Own Scaffold + resizeToAvoidBottomInset
+  ├── Own BossCountdownController (started in initState)
+  ├── _CompactStatusBar (56 px gradient pill)
+  │     ├── ● live cyan dot + countdown digits
+  │     └── RAID  5/15  [Join] (calls JoinRaid via injector)
+  └── ChatBox(watchChat, sendMessage, userId)
+        ├── _AnimatedGradientField (SweepGradient animation)
+        ├── send: WhatsApp-style optimistic
+        │     ↓ clear input instantly
+        │     ↓ unawaited(_dispatchSend(text))
+        │           ↓ SendMessage validates length
+        │           ↓ ChatRepository.send(uid, text)
+        │           ↓ stream emits → bubble slides in
+        │     ↓ on Err → restore text + show banner
+        └── auto-scroll on every new message
 ```
 
 ---
@@ -578,7 +635,8 @@ Component conventions:
 ## 13. Performance notes
 
 The app sustains a perceived-smooth 10 Hz timer with three live
-Firestore listeners on a single screen. The patterns that make that
+Firestore listeners on a single screen, and zero parent rebuilds
+during keyboard show/hide transitions. The patterns that make that
 cheap:
 
 - **Local ticking.** The boss timer reads one document once per
@@ -589,8 +647,27 @@ cheap:
   `RepaintBoundary` isolates the repaint into its own compositor
   layer; `AnimatedBuilder` caches subtrees that don't change
   per-frame via the `child` parameter.
+- **No keyboard dependency in `HomeScreen.build`.** The home screen
+  does not read `MediaQuery.viewInsets` or any inherited widget that
+  changes when the keyboard slides. Android emits dozens of
+  viewport-metrics events during a keyboard transition; none of them
+  trigger `HomeScreen.build()`. The `Scaffold`'s native
+  `resizeToAvoidBottomInset` handles the resize, and the `Expanded`
+  chat preview absorbs the height change.
+- **Cached children in `initState`.** `HomeScreen` constructs its
+  `AppBar`, `WorldBossTimer`, `RaidJoinButton`, and `ChatBox` once in
+  `initState` and stores them in instance fields. Even if `build()`
+  ever runs again, Flutter sees the same `Widget` references and
+  short-circuits the subtree reconciliation.
+- **`RepaintBoundary` around every major surface.** A new chat message
+  no longer marks the boss timer's compositor layer dirty; the 10 Hz
+  timer doesn't invalidate the chat list's layer. Each section paints
+  into its own GPU texture.
 - **Bounded streams.** Chat uses `.limitToLast(50)` so the
   per-listener read cost stays flat as messages accumulate.
+- **Optimistic send.** Chat write goes through `unawaited(...)` so
+  the UI never blocks on the Firestore round-trip — no spinner, no
+  disabled state. Failures are caught and restore the input.
 - **No state-management framework overhead.** Direct
   `StreamBuilder` / `FutureBuilder` / `ValueListenableBuilder` —
   zero reflection, zero broadcasting infrastructure.
@@ -667,6 +744,18 @@ timestamp in the Firebase console to a future moment.
 `events/dragon_raid` document is missing. Fix: create it in the
 Firebase console with the schema in [Section 5](#5-data-model).
 
+**Chat input on the home screen does not show a keyboard / cannot
+type.** That's intentional. The home screen's `ChatBox` is in
+preview mode — its composer is a "Tap to write a message…" pill.
+Tap it to push the dedicated [`ChatScreen`](#74-engagement-chat),
+which has the real input and proper keyboard handling.
+
+**Sent message doesn't appear immediately.** It should arrive via
+the Firestore stream within a few hundred milliseconds; the
+auto-scroll path animates it into view. If the input is restored
+with your text and an error banner shows below the chat, the write
+failed — check security rules and authentication.
+
 ---
 
 ## 16. Extending the project
@@ -719,4 +808,4 @@ deliverable" to "production feature":
 
 ---
 
-*Last updated: 2026-05-16*
+*Last updated: 2026-05-17*

@@ -1,18 +1,9 @@
 import 'dart:async';
-
 import 'package:flutter/foundation.dart';
-
 import '../domain/entities/world_boss.dart';
 import '../domain/usecases/watch_world_boss.dart';
 
-/// Drives the 100 ms countdown UI.
-///
-/// One snapshot listener (via [WatchWorldBoss]) supplies the absolute
-/// end-time; a local `Timer.periodic(100ms)` recomputes the remaining
-/// duration from `DateTime.now()`. Exposes a [ValueListenable] so the
-/// widget can rebuild only its timer text via `ValueListenableBuilder`
-/// inside a `RepaintBoundary` — the rest of the screen never sees a
-/// 10 Hz frame.
+
 final class BossCountdownController {
   BossCountdownController({required WatchWorldBoss watchWorldBoss})
       : _watchWorldBoss = watchWorldBoss;

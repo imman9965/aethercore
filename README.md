@@ -1,22 +1,26 @@
 # AetherCore — Project Aether
 
-A single-screen Flutter "nervous system" for a global MMORPG: a 100 ms World Boss
-countdown, a 15-slot Geo-Raid signup, and a real-time engagement chat. Backed by
-Cloud Firestore, gated on Anonymous Authentication, architected for atomic
-integrity under a thundering herd.
+A Flutter "nervous system" for a global MMORPG: a 100 ms World Boss countdown,
+a 15-slot Geo-Raid signup, and a real-time engagement chat. The home screen
+shows all three surfaces at once; a dedicated `ChatScreen` is pushed for
+typing so the soft keyboard never fights the timer or raid card for room.
+Backed by Cloud Firestore, gated on Anonymous Authentication, architected
+for atomic integrity under a thundering herd.
 
 ## Architectural Outcomes
 
-**Global Atomic Integrity.** `FirestoreRaidRepository.tryJoin` wraps a
-read-then-write in `FirebaseFirestore.runTransaction`. Under 50-concurrent
-contention, Firestore's optimistic concurrency control retries colliding
-transactions until every reader sees a consistent `slots_filled`, so exactly
-`max_slots` joins return `JoinOutcome.admitted` and the rest return one of
-`raidFull`, `alreadyJoined`, `raidNotFound`, or `infrastructureError`. The
-`JoinRaid` use case is the call site the UI depends on; `lib/raid_service.dart`
-is a 30-line facade that collapses the outcome enum to a `bool` for the
-provided test harness. `test/raid_concurrency_test.dart` proves the cap with
-an in-memory fake — no Firebase project required to verify.
+**Global Atomic Integrity.** The 15-slot cap is enforced at two independent
+layers. `FirestoreRaidRepository.tryJoin` holds a Future-chain mutex
+(`_serialization`) so concurrent calls from the same client serialize FIFO,
+guaranteeing each one's `_raidRef.get()` observes the previous one's
+`_raidRef.update()`. The Firestore security rule on `events/dragon_raid` then
+enforces `slots_filled == old + 1 && slots_filled <= max_slots` at the server
+boundary, so two clients racing past their local locks still can't oversell
+the raid. The `JoinRaid` use case returns a `JoinOutcome` enum (`admitted`,
+`raidFull`, `alreadyJoined`, `raidNotFound`, `infrastructureError`);
+`lib/raid_service.dart` is a 30-line facade collapsing the enum to `bool`
+for the provided test harness. `test/raid_concurrency_test.dart` proves the
+cap with an in-memory fake — no Firebase project required to verify.
 
 **100 ms Pulse Without 100 ms Reads.** `FirestoreWorldBossRepository` opens a
 single snapshot listener on `events/world_boss` and emits the absolute
@@ -79,9 +83,10 @@ lib/
 ├── di/
 │   └── injector.dart                  Manual composition root.
 ├── app/
-│   ├── app.dart                       MaterialApp + theme.
+│   ├── app.dart                       MaterialApp + theme tokens.
 │   ├── auth_gate.dart                 Anonymous sign-in gate.
-│   └── home_screen.dart               Single-screen composition.
+│   ├── home_screen.dart               Hero composition (boss + raid + chat preview).
+│   └── chat_screen.dart               Dedicated full-screen typing experience.
 └── features/
     ├── auth/
     │   ├── domain/                    AuthUser, AuthRepository, EnsureSignedIn.
@@ -89,7 +94,8 @@ lib/
     ├── raid/
     │   ├── domain/                    RaidState, JoinOutcome, RaidRepository,
     │   │                              JoinRaid, WatchRaidState.
-    │   ├── data/                      FirestoreRaidRepository (transactional).
+    │   ├── data/                      FirestoreRaidRepository
+    │   │                              (Future-chain mutex + rule-enforced cap).
     │   └── presentation/              RaidJoinButton.
     ├── world_boss/
     │   ├── domain/                    WorldBoss, WorldBossRepository,
@@ -101,7 +107,9 @@ lib/
         ├── domain/                    ChatMessage, ChatRepository,
         │                              WatchChat, SendMessage.
         ├── data/                      FirestoreChatRepository (sharded).
-        └── presentation/              ChatBox.
+        └── presentation/              ChatBox (animated gradient input,
+                                       optimistic send, auto-scroll,
+                                       tap-pill mode for home preview).
 
 test/
 ├── raid_concurrency_test.dart         Thundering-herd integrity proof.
@@ -117,6 +125,20 @@ Rather than fight that convention, `raid_service.dart` is a thin adapter that
 internally constructs `FirestoreRaidRepository` and the `JoinRaid` use case,
 exposing only the boolean `joinRaid` the test consumes. Application code
 depends on `JoinRaid` via the `Injector`, never on the facade.
+
+### Two-screen UX (home + dedicated chat)
+
+The home screen renders all three live surfaces at once — full boss timer,
+full raid card, full chat message list — with the chat's composer replaced
+by a tappable "Tap to write a message…" pill. Tapping the pill pushes
+`ChatScreen` via `Navigator.push`, a dedicated full-screen typing surface
+with its own `BossCountdownController`, a 56-px gradient status bar showing
+the live boss countdown + raid count + inline Join, and the real `ChatBox`
+input. This separation means the home screen stays uncluttered and the
+typing screen has plenty of vertical room for the keyboard without
+collapsing the timer or the raid card. `ChatScreen.dispose()` tears down
+its own controller, and `HomeScreen.build` never depends on
+`MediaQuery.viewInsets`, so keyboard slides cost zero parent rebuilds.
 
 ## Verification
 
@@ -189,6 +211,11 @@ service cloud.firestore {
 ```
 
 The `dragon_raid` update rule is the second line of defence behind the
-transaction: even a misbehaving client cannot oversell the raid because the
-database itself refuses any update that does not increment `slots_filled` by
-exactly one and stay within `max_slots`.
+in-process serialization lock: even two real clients racing past their local
+locks at the same instant cannot oversell the raid, because the server
+refuses any update that does not increment `slots_filled` by exactly one
+or that would push it past `max_slots`. The arithmetic predicate in the
+rule (`request.resource.data.slots_filled == resource.data.slots_filled + 1`)
+is what turns "client says +1" into "server proves +1 from the current
+authoritative value", which is the cross-client analog of what the in-process
+mutex does for one client.

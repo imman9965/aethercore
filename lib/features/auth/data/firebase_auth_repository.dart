@@ -5,11 +5,6 @@ import '../../../core/result/result.dart';
 import '../domain/entities/auth_user.dart';
 import '../domain/repositories/auth_repository.dart';
 
-/// Firebase-backed [AuthRepository] using anonymous sign-in.
-///
-/// Anonymous auth gives every device a stable `uid` without a signup
-/// flow — that uid is the source of truth for raid attribution and
-/// chat authorship.
 final class FirebaseAuthRepository implements AuthRepository {
   FirebaseAuthRepository({required FirebaseAuth auth}) : _auth = auth;
 

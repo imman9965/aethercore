@@ -1,14 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../../../core/colors/colors.dart';
+import '../../../widgets/live_pulse.dart';
 
-import '../../../app/app.dart';
-
-/// Renders the World Boss countdown at 100 ms resolution.
-///
-/// Hero card with a deep cobalt → midnight gradient and a soft cyan
-/// glow ringing the digits. Wrapped in `RepaintBoundary` so the 10 Hz
-/// tick is isolated to its own compositor layer; subscribes via
-/// `ValueListenableBuilder` so only the digits subtree rebuilds.
 class WorldBossTimer extends StatelessWidget {
   const WorldBossTimer({super.key, required this.remaining});
 
@@ -53,8 +47,8 @@ class WorldBossTimer extends StatelessWidget {
                   shape: BoxShape.circle,
                   gradient: RadialGradient(
                     colors: <Color>[
-                      AetherApp.kAccentCyan.withValues(alpha: 0.35),
-                      AetherApp.kAccentCyan.withValues(alpha: 0.0),
+                      AppColors.kAccentCyan.withValues(alpha: 0.35),
+                      AppColors.kAccentCyan.withValues(alpha: 0.0),
                     ],
                   ),
                 ),
@@ -66,7 +60,7 @@ class WorldBossTimer extends StatelessWidget {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: <Widget>[
-                    _LivePulse(),
+                    LivePulse(),
                     const SizedBox(width: 8),
                     Text(
                       'WORLD BOSS',
@@ -86,7 +80,7 @@ class WorldBossTimer extends StatelessWidget {
                     return Text(
                       _format(value),
                       style: TextStyle(
-                        fontSize: 48,
+                        fontSize: 30,
                         height: 1.0,
                         fontWeight: FontWeight.w800,
                         color: Colors.white,
@@ -97,7 +91,7 @@ class WorldBossTimer extends StatelessWidget {
                         shadows: <Shadow>[
                           Shadow(
                             color:
-                                AetherApp.kAccentCyan.withValues(alpha: 0.55),
+                                AppColors.kAccentCyan.withValues(alpha: 0.55),
                             blurRadius: 22,
                           ),
                         ],
@@ -131,25 +125,4 @@ class WorldBossTimer extends StatelessWidget {
   }
 }
 
-/// Tiny cyan dot — a static "LIVE" indicator. (No animation to keep the
-/// 100 ms rebuild scope minimal; the timer digits provide all the motion
-/// the eye needs.)
-class _LivePulse extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 10,
-      height: 10,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: AetherApp.kAccentCyan,
-        boxShadow: <BoxShadow>[
-          BoxShadow(
-            color: AetherApp.kAccentCyan.withValues(alpha: 0.75),
-            blurRadius: 8,
-          ),
-        ],
-      ),
-    );
-  }
-}
+
