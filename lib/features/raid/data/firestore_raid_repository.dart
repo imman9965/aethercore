@@ -71,9 +71,9 @@ final class FirestoreRaidRepository implements RaidRepository {
         }
 
         // === CRITICAL: Use FieldValue.increment for safer updates ===
-        // transaction.update(_raidRef, {
-        //   'slots_filled': FieldValue.increment(1),
-        // });
+        transaction.update(_raidRef, {
+          'slots_filled': FieldValue.increment(1),
+        });
 
         transaction.set(_joinerRef(userId), {
           'userId': userId,
