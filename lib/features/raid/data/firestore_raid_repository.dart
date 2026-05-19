@@ -28,7 +28,9 @@ final class FirestoreRaidRepository implements RaidRepository {
 
   @override
   Future<JoinOutcome> tryJoin({required String userId}) async {
-    debugPrint('🔄 [raid-repo] tryJoin called for: $userId');
+    if (kDebugMode) {
+      debugPrint('🔄 [raid-repo] tryJoin called for: $userId');
+    }
 
     final previous = _serialization;
     final completer = Completer<void>();
@@ -46,19 +48,27 @@ final class FirestoreRaidRepository implements RaidRepository {
   Future<JoinOutcome> _attemptJoin(String userId) async {
     try {
       return await _firestore.runTransaction<JoinOutcome>((transaction) async {
-        debugPrint('🔄 Transaction started for user: $userId');
+        if (kDebugMode) {
+          debugPrint('🔄 Transaction started for user: $userId');
+        }
 
         final raidSnap = await transaction.get(_raidRef);
 
         if (!raidSnap.exists) {
-          debugPrint('❌ Raid document does not exist');
+          if (kDebugMode) {
+            debugPrint('❌ Raid document does not exist');
+          }
           return JoinOutcome.raidNotFound;
         }
 
         final data = raidSnap.data() ?? {};
         final parsed = _parseRaidData(data);
 
-        debugPrint('📊 Current slots_filled: ${parsed.slots} | maxSlots: ${parsed.max}');
+        if (kDebugMode) {
+          debugPrint(
+            '📊 Current slots_filled: ${parsed.slots} | maxSlots: ${parsed.max}',
+          );
+        }
 
         if (parsed.max > 0 && parsed.slots >= parsed.max) {
           return JoinOutcome.raidFull;
@@ -80,24 +90,32 @@ final class FirestoreRaidRepository implements RaidRepository {
           'joinedAt': FieldValue.serverTimestamp(),
         });
 
-        debugPrint('✅ Transaction updates prepared');
+        if (kDebugMode) {
+          debugPrint('✅ Transaction updates prepared');
+        }
         return JoinOutcome.admitted;
       });
     } on FirebaseException catch (e) {
-      debugPrint('🔥 Firebase Error: ${e.code} - ${e.message}');
+      if (kDebugMode) {
+        debugPrint('🔥 Firebase Error: ${e.code} - ${e.message}');
 
-      if (e.code == 'permission-denied') {
-        debugPrint('🚫 PERMISSION DENIED → Check your Security Rules!');
-      } else if (e.code == 'not-found') {
-        debugPrint('❌ Document not found');
-      } else if (e.code == 'aborted') {
-        debugPrint('⚔️ Transaction aborted (concurrent modification)');
-        return JoinOutcome.raidFull;
+        if (e.code == 'permission-denied') {
+          debugPrint('🚫 PERMISSION DENIED → Check your Security Rules!');
+        } else if (e.code == 'not-found') {
+          debugPrint('❌ Document not found');
+        } else if (e.code == 'aborted') {
+          debugPrint('⚔️ Transaction aborted (concurrent modification)');
+        }
       }
 
+      if (e.code == 'aborted') {
+        return JoinOutcome.raidFull;
+      }
       return JoinOutcome.infrastructureError;
     } catch (e, stack) {
-      debugPrint('❌ Unexpected error: $e\n$stack');
+      if (kDebugMode) {
+        debugPrint('❌ Unexpected error: $e\n$stack');
+      }
       return JoinOutcome.infrastructureError;
     }
   }
@@ -124,7 +142,9 @@ final class FirestoreRaidRepository implements RaidRepository {
 
   @override
   Stream<RaidState> watch() {
-    debugPrint('[raid-repo] Subscribing to events/dragon_raid');
+    if (kDebugMode) {
+      debugPrint('[raid-repo] Subscribing to events/dragon_raid');
+    }
 
     return _raidRef.snapshots().map(_mapToState);
   }
@@ -137,7 +157,11 @@ final class FirestoreRaidRepository implements RaidRepository {
     final data = snap.data() ?? {};
     final parsed = _parseRaidData(data);
 
-    debugPrint('[raid-repo] Updated → slotsFilled: ${parsed.slots} / max: ${parsed.max}');
+    if (kDebugMode) {
+      debugPrint(
+        '[raid-repo] Updated → slotsFilled: ${parsed.slots} / max: ${parsed.max}',
+      );
+    }
 
     return RaidState(
       slotsFilled: parsed.slots,

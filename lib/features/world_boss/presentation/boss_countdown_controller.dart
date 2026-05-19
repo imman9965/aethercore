@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart';
-
 import '../domain/entities/world_boss.dart';
 import '../domain/usecases/watch_world_boss.dart';
 
@@ -9,7 +7,7 @@ import '../domain/usecases/watch_world_boss.dart';
 /// Pipeline:
 ///   Firestore stream (events/world_boss) ─► _endTime cache
 ///   Timer.periodic(100 ms) ─► emits (endTime − now()) on `remaining`
-///   StreamBuilder<Duration> rebuilds the digits at 10 Hz
+///   `StreamBuilder<Duration>` rebuilds the digits at 10 Hz
 ///
 /// No synthetic fallback. Until Firestore delivers a valid
 /// `boss_end_time`, the stream emits nothing and the UI shows the
@@ -37,25 +35,33 @@ final class BossCountdownController {
 
   /// Begin streaming the boss state and ticking the local countdown.
   /// Idempotent — subsequent calls are no-ops.
+  ///
+  /// The 100 ms ticker is created lazily on the first boss snapshot
+  /// (see [_onBossUpdate]) rather than here. Observable behaviour is
+  /// unchanged because [_emit] already short-circuits while
+  /// `_endTime == null`, but we no longer burn 10 wake-ups per second
+  /// between app start and the first Firestore delivery.
   void start() {
     if (_sub != null) return;
 
-    debugPrint('[boss] start() — subscribing to events/world_boss');
+    // Print('[boss] start() — subscribing to events/world_boss');
 
     _sub = _watchWorldBoss().listen(
       _onBossUpdate,
-      onError: (Object e, StackTrace s) =>
-          debugPrint('[boss] STREAM ERROR: $e'),
+      // onError: (Object e, StackTrace s) =>
+      //     debugPrint('[boss] STREAM ERROR: $e'),
     );
-
-    _ticker = Timer.periodic(_tick, (_) => _emit());
   }
 
   void _onBossUpdate(WorldBoss boss) {
-    debugPrint(
-      '[boss] snapshot received — ${boss.bossName} endTime=${boss.endTime}',
-    );
+    // debugPrint(
+    //   '[boss] snapshot received — ${boss.bossName} endTime=${boss.endTime}',
+    // );
     _endTime = boss.endTime;
+    // Lazy ticker start: only spin up the periodic timer once we
+    // actually have an end-time to count down to. `??=` keeps this
+    // idempotent across subsequent snapshots (boss reset, new event).
+    _ticker ??= Timer.periodic(_tick, (_) => _emit());
     _emit();
   }
 

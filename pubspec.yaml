@@ -41,15 +41,14 @@ dependencies:
   firebase_core: ^3.6.0
   firebase_auth: ^5.3.4
   cloud_firestore: ^5.4.5
-  firebase_messaging: ^15.1.5
-  get: ^4.7.3
-  uuid: ^4.5.3
-  intl: ^0.20.2
-  flutter_svg: ^2.3.0
-  cached_network_image: ^3.4.1
-  rxdart: ^0.28.0
-  logger: ^2.7.0
-  mocktail: ^1.0.5
+  # firebase_messaging: ^15.1.5  # Not used in lib/. Re-enable when push lands.
+  # get: ^4.7.3                  # Not imported anywhere — DI is manual.
+  # uuid: ^4.5.3                 # Not imported anywhere.
+  # intl: ^0.20.2                # Not imported anywhere.
+  # flutter_svg: ^2.3.0          # Not imported anywhere.
+  # cached_network_image: ^3.4.1 # Not imported anywhere.
+  # rxdart: ^0.28.0              # Not imported anywhere — plain Streams suffice.
+  # logger: ^2.7.0               # Not imported anywhere — debugPrint is used.
 
 dev_dependencies:
   flutter_test:
@@ -65,6 +64,10 @@ dev_dependencies:
   # In-memory Firestore fake used by test/raid_concurrency_test.dart.
   # 3.x is the line that pairs with cloud_firestore 5.x.
   fake_cloud_firestore: ^3.1.0
+
+  # mocktail was previously listed as a runtime dependency but is only
+  # useful from tests; parked here for the next test that needs mocks.
+  mocktail: ^1.0.5
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

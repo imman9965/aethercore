@@ -48,6 +48,15 @@ class _ChatBoxState extends State<ChatBox> {
   // message arrived from anyone) and auto-scroll to the bottom.
   int _previousMessageCount = -1;
 
+  // Cache the chat stream once. `widget.watchChat(userId: ...)` returns
+  // a fresh Firestore `.snapshots()` query on every call, so reading it
+  // inline in `_buildMessageList()` re-subscribed (and re-read the
+  // limit-50 tail) on every `setState` — error display, send retry,
+  // etc. Capture once so the subscription persists for the whole
+  // lifetime of this State.
+  late final Stream<List<ChatMessage>> _chatStream =
+      widget.watchChat(userId: widget.userId);
+
   /// Schedules a scroll to the bottom on the next frame, after the
   /// new ListView item has been laid out and `maxScrollExtent` reflects
   /// the new content height.
@@ -170,7 +179,7 @@ class _ChatBoxState extends State<ChatBox> {
 
   Widget _buildMessageList() {
     return StreamBuilder<List<ChatMessage>>(
-      stream: widget.watchChat(userId: widget.userId),
+      stream: _chatStream,
       builder: (BuildContext context,
           AsyncSnapshot<List<ChatMessage>> snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {

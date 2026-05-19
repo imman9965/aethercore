@@ -1,6 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
-
 import '../domain/entities/world_boss.dart';
 import '../domain/repositories/world_boss_repository.dart';
 
@@ -28,7 +27,9 @@ final class FirestoreWorldBossRepository implements WorldBossRepository {
 
   @override
   Stream<WorldBoss> watch() {
-    debugPrint('[boss-repo] Subscribing to events/world_boss');
+    if (kDebugMode) {
+      debugPrint('[boss-repo] Subscribing to events/world_boss');
+    }
     return _firestore
         .collection(_collection)
         .doc(_docId)
@@ -39,28 +40,39 @@ final class FirestoreWorldBossRepository implements WorldBossRepository {
 
   /// Filter: only let through snapshots that have a valid
   /// `boss_end_time` Timestamp (whitespace in the key is tolerated).
+  ///
+  /// Diagnostic prints are gated by [kDebugMode] so release builds
+  /// don't allocate interpolated strings or scan key whitespace.
   bool _hasValidEndTime(DocumentSnapshot<Map<String, dynamic>> snap) {
     final Map<String, dynamic>? data = snap.data();
-    debugPrint(
-      '[boss-repo] snapshot exists=${snap.exists} data=$data',
-    );
-    if (data == null) {
+    if (kDebugMode) {
       debugPrint(
-        '[boss-repo] doc does not exist — no emission. '
-        'Create events/world_boss in the Console.',
+        '[boss-repo] snapshot exists=${snap.exists} data=$data',
       );
+    }
+    if (data == null) {
+      if (kDebugMode) {
+        debugPrint(
+          '[boss-repo] doc does not exist — no emission. '
+          'Create events/world_boss in the Console.',
+        );
+      }
       return false;
     }
 
-    _warnIfMalformedKeys(data);
+    if (kDebugMode) {
+      _warnIfMalformedKeys(data);
+    }
 
     final Timestamp? ts = _findTimestamp(data, 'boss_end_time');
     if (ts == null) {
-      debugPrint(
-        '[boss-repo] boss_end_time missing or wrong type — no emission. '
-        'Field must be named exactly "boss_end_time" and stored as '
-        'timestamp (whitespace in the name is tolerated).',
-      );
+      if (kDebugMode) {
+        debugPrint(
+          '[boss-repo] boss_end_time missing or wrong type — no emission. '
+          'Field must be named exactly "boss_end_time" and stored as '
+          'timestamp (whitespace in the name is tolerated).',
+        );
+      }
       return false;
     }
     return true;
@@ -72,9 +84,11 @@ final class FirestoreWorldBossRepository implements WorldBossRepository {
     final DateTime endTime = ts.toDate();
     final String bossName = _findString(data, 'boss_name') ?? 'Grok';
 
-    debugPrint(
-      '[boss-repo] emit endTime=$endTime bossName=$bossName',
-    );
+    if (kDebugMode) {
+      debugPrint(
+        '[boss-repo] emit endTime=$endTime bossName=$bossName',
+      );
+    }
     return WorldBoss(endTime: endTime, bossName: bossName);
   }
 

@@ -29,6 +29,14 @@ class _RaidJoinButtonState extends State<RaidJoinButton> {
   bool _submitting = false;
   JoinOutcome? _lastOutcome;
 
+  // Cache the stream once: `widget.watchRaidState()` returns a fresh
+  // `_raidRef.snapshots()` listener on every call. Reading it directly
+  // inside `build()` caused StreamBuilder to tear down and re-subscribe
+  // every time `setState` fired (each tap toggles `_submitting` twice),
+  // billing a fresh Firestore read each round-trip. Capturing once
+  // keeps the subscription stable for the lifetime of the State.
+  late final Stream<RaidState> _raidStateStream = widget.watchRaidState();
+
   Future<void> _onPressed() async {
     setState(() {
       _submitting = true;
@@ -48,7 +56,7 @@ class _RaidJoinButtonState extends State<RaidJoinButton> {
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<RaidState>(
-      stream: widget.watchRaidState(),
+      stream: _raidStateStream,
       builder: (BuildContext context, AsyncSnapshot<RaidState> snap) {
         final RaidState state =
             snap.data ?? const RaidState(slotsFilled: 0, maxSlots: 15);

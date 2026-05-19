@@ -9,35 +9,61 @@ for atomic integrity under a thundering herd.
 
 ## Architectural Outcomes
 
-**Global Atomic Integrity.** The 15-slot cap is enforced at two independent
-layers. `FirestoreRaidRepository.tryJoin` holds a Future-chain mutex
-(`_serialization`) so concurrent calls from the same client serialize FIFO,
-guaranteeing each one's `_raidRef.get()` observes the previous one's
-`_raidRef.update()`. The Firestore security rule on `events/dragon_raid` then
-enforces `slots_filled == old + 1 && slots_filled <= max_slots` at the server
-boundary, so two clients racing past their local locks still can't oversell
-the raid. The `JoinRaid` use case returns a `JoinOutcome` enum (`admitted`,
-`raidFull`, `alreadyJoined`, `raidNotFound`, `infrastructureError`);
-`lib/raid_service.dart` is a 30-line facade collapsing the enum to `bool`
-for the provided test harness. `test/raid_concurrency_test.dart` proves the
-cap with an in-memory fake — no Firebase project required to verify.
+**Global Atomic Integrity.** The 15-slot cap is enforced at three
+independent layers. (1) `FirestoreRaidRepository.tryJoin` holds a
+Future-chain mutex (`_serialization`) so concurrent calls from the same
+client serialize FIFO, guaranteeing each one's read observes the previous
+one's write — this is what makes the in-memory `FakeFirebaseFirestore`
+test pass deterministically, since the fake does not simulate OCC retries
+under in-process contention. (2) Inside the mutex, the actual write runs
+through `_firestore.runTransaction`, which re-reads the doc, checks the
+cap and the joiner sub-doc, then commits `slots_filled:
+FieldValue.increment(1)` and the `joiners/{uid}` doc atomically; an
+`'aborted'` FirebaseException (real client concurrent-write race) maps to
+`JoinOutcome.raidFull`. (3) The Firestore security rule on
+`events/dragon_raid` enforces `slots_filled == old + 1 && slots_filled <=
+max_slots` at the server boundary, so even two clients racing past both
+their local locks and the transaction OCC still can't oversell the raid.
 
-**100 ms Pulse Without 100 ms Reads.** `FirestoreWorldBossRepository` opens a
-single snapshot listener on `events/world_boss` and emits the absolute
-end-time. `BossCountdownController` caches that end-time and runs a local
-`Timer.periodic(100ms)` that recomputes `remaining` from `DateTime.now()`,
-pushing each value through a `ValueNotifier`. `WorldBossTimer` binds to that
-notifier via `ValueListenableBuilder` wrapped in `RepaintBoundary`, so the
-timer text is the only thing rebuilt at 10 Hz — the raid button and chat list
-never see a frame at that frequency.
+`JoinRaid` returns a `JoinOutcome` enum (`admitted`, `raidFull`,
+`alreadyJoined`, `raidNotFound`, `infrastructureError`);
+`lib/raid_service.dart` is a 30-line facade collapsing the enum to `bool`
+for the provided test harness. `test/raid_concurrency_test.dart` proves
+the cap with an in-memory fake — no Firebase project required to verify.
+
+**100 ms Pulse Without 100 ms Reads.** `FirestoreWorldBossRepository`
+opens a single snapshot listener on `events/world_boss` and emits the
+absolute end-time. `BossCountdownController` caches that end-time and
+lazily spins up a `Timer.periodic(100ms)` on the *first* boss snapshot
+(not at `start()`, so no wake-ups are burnt while waiting for Firestore).
+Each tick recomputes `endTime - DateTime.now()` and pushes onto a
+`StreamController<Duration>.broadcast()`. `WorldBossTimer` binds via
+`StreamBuilder<Duration>` inside a `RepaintBoundary`, so the timer text
+is the only thing rebuilt at 10 Hz — the raid button and chat list never
+see a frame at that frequency.
 
 **Forced Lints, Forced Error Handling.** Code is strongly typed: `dynamic`
-appears only at the Firestore boundary and is cast immediately. Every fallible
-domain operation returns `Result<T>` (sealed `Ok | Err`) or a domain-specific
-enum (`JoinOutcome`); call sites must handle both arms or the compiler refuses
-the program. Exception handlers translate `FirebaseException` into a typed
-`AppFailure` — there is no path through the code that silently swallows an
-error. No `print`, no empty `catch`, no unawaited futures.
+appears only at the Firestore boundary and is cast immediately. Every
+fallible domain operation returns `Result<T>` (sealed `Ok | Err`) or a
+domain-specific enum (`JoinOutcome`); call sites must handle both arms or
+the compiler refuses the program. Exception handlers translate
+`FirebaseException` into a typed `AppFailure` — there is no path through
+the code that silently swallows an error. No `print`, no empty `catch`,
+and the only `unawaited(...)` sites are deliberate (controller dispose
+during widget teardown; optimistic chat-send fire-and-forget). Hot-path
+`debugPrint` calls are gated by `kDebugMode` so release builds skip the
+string interpolation entirely.
+
+**Targeted Rebuilds, Bounded Reads.** Stream-producing use cases
+(`watchRaidState`, `watchChat`) are invoked once per State instance and
+cached in `late final` fields, so a `setState` rebuild reuses the same
+`StreamBuilder` subscription instead of tearing down and re-establishing
+a Firestore listener. Chat reads are clamped by `.orderBy('createdAt')
+.limitToLast(50)` so the per-session read budget is fixed regardless of
+total message volume. The boss timer's 100 ms ticker doesn't start until
+the first Firestore snapshot lands. Every major surface (timer card,
+raid card, chat list) is wrapped in its own `RepaintBoundary`, so the
+10 Hz timer never dirties the chat compositor layer.
 
 ## Cost & Sharding — 10,000 Concurrent Chatters
 

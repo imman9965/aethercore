@@ -60,14 +60,13 @@ only supports `cloud_firestore 5.x`. Every Firestore and Auth API used
 in this codebase is identical between 5.x and 6.x, so the pin is purely
 a test-tooling concession.
 
-Runtime dependencies of interest:
+Runtime dependencies (everything actually imported by `lib/`):
 
 ```
+cupertino_icons          ^1.0.8     (Flutter project convention)
 firebase_core            ^3.6.0
 firebase_auth            ^5.3.4
 cloud_firestore          ^5.4.5
-firebase_messaging       ^15.1.5
-get, uuid, intl, rxdart, logger, mocktail   (supporting utilities)
 ```
 
 Dev dependencies:
@@ -76,12 +75,20 @@ Dev dependencies:
 flutter_test             (sdk: flutter)
 flutter_lints            ^6.0.0
 fake_cloud_firestore     ^3.1.0
+mocktail                 ^1.0.5     (parked for future mock-based tests)
 ```
 
+`pubspec.yaml` keeps commented-out entries for `firebase_messaging`,
+`get`, `uuid`, `intl`, `flutter_svg`, `cached_network_image`, `rxdart`,
+and `logger`. Earlier scaffolding pulled them in but nothing in `lib/`
+imports them, so they were removed from the active dependency set to
+shrink build output and native-plugin glue. Each commented line carries
+a one-word rationale; re-enable by un-commenting.
+
 No state management framework is mandated. The app uses native
-`ValueNotifier`, `StreamBuilder`, `FutureBuilder`, and constructor
-injection through a hand-rolled `Injector` — sufficient for a single
-screen with three independent reactive surfaces.
+`StreamBuilder`, `FutureBuilder`, and constructor injection through a
+hand-rolled `Injector` — sufficient for a single screen with three
+independent reactive surfaces.
 
 ---
 
@@ -314,28 +321,41 @@ Firestore read per session**.
 The trick: `FirestoreWorldBossRepository.watch()` subscribes to the
 `events/world_boss` document and emits a `WorldBoss` entity (which
 carries the absolute `boss_end_time`). `BossCountdownController`
-caches that end-time and runs a local `Timer.periodic(100ms)` that
-recomputes the remaining duration as `endTime - DateTime.now()`,
-pushing each value into a `ValueNotifier<Duration>`.
+caches that end-time and lazily spins up a `Timer.periodic(100ms)` on
+the *first* boss snapshot — not at `start()`, so we don't burn 10
+wake-ups per second while waiting for Firestore to deliver. Each tick
+recomputes `endTime - DateTime.now()` and pushes onto a
+`StreamController<Duration>.broadcast()`.
 
-The widget (`WorldBossTimer`) binds via `ValueListenableBuilder` and
+The widget (`WorldBossTimer`) binds via `StreamBuilder<Duration>` and
 is wrapped in `RepaintBoundary`. That combination means:
 
 - Only the digits subtree rebuilds at 10 Hz.
 - The repaint is isolated to its own compositor layer — the raid card
   and chat list above and below never see a frame at that frequency.
+- Until Firestore delivers a valid `boss_end_time`, the stream emits
+  nothing and the UI shows the `StreamBuilder`'s `initialData`
+  (`00:00.0`). No synthetic fallback.
+
+The data-layer key lookup tolerates whitespace and case (`"Boss_End_Time"`
+or `"boss_end_time  "` still resolve), and `_warnIfMalformedKeys` logs a
+loud warning so the bad field can be cleaned up in the console. The
+warning iteration and all per-snapshot `debugPrint` calls are gated by
+`kDebugMode`, so release builds incur zero overhead.
 
 Tear-down: `HomeScreen.dispose()` calls `_bossController.dispose()`,
 which cancels the Firestore subscription, cancels the Timer, and
-disposes the `ValueNotifier`. No leaks.
+closes the `StreamController`. No leaks.
 
 ### 7.3 Dragon Raid
 
-The integrity-critical feature. The 15-slot cap is enforced at three
+The integrity-critical feature. The 15-slot cap is enforced at four
 layers, in order:
 
 1. **UI disabled state.** `RaidJoinButton` listens to the raid doc's
-   live stream; when `slots_filled >= max_slots` the button is
+   live stream (cached once in `late final _raidStateStream =
+   widget.watchRaidState()` so setState rebuilds don't churn the
+   Firestore listener); when `slots_filled >= max_slots` the button is
    disabled and reads "Raid full". This is purely UX — the underlying
    layers are still authoritative.
 2. **In-process Dart serialization lock.** `FirestoreRaidRepository`
@@ -343,15 +363,23 @@ layers, in order:
    awaits the previous chain link before starting, then publishes its
    own completer for the next caller. This guarantees that 50
    concurrent calls *on the same client* execute one at a time, so
-   each one's `_raidRef.get()` observes the previous one's
-   `_raidRef.update()`. This is what makes the concurrency test pass
-   under `FakeFirebaseFirestore`, whose `runTransaction` does not
-   simulate OCC retries under in-process contention.
-3. **Firestore security rule.** The rule on `events/dragon_raid`
+   each one's read observes the previous one's write. This is what
+   makes the concurrency test pass under `FakeFirebaseFirestore`,
+   whose `runTransaction` does not simulate OCC retries under
+   in-process contention.
+3. **Firestore transaction (OCC).** Inside the lock, the write runs
+   through `_firestore.runTransaction`: re-read the raid doc, check
+   the cap, check the `joiners/{uid}` sub-doc for double-join, then
+   commit `slots_filled: FieldValue.increment(1)` and
+   `joiners/{uid}: {userId, joinedAt}` atomically. A
+   `FirebaseException` with `code == 'aborted'` (a real concurrent
+   write collided) maps cleanly to `JoinOutcome.raidFull` instead of
+   propagating as an error.
+4. **Firestore security rule.** The rule on `events/dragon_raid`
    enforces `slots_filled == old + 1 && slots_filled <= max_slots`,
-   so even two real clients racing past their local locks cannot
-   oversell the raid — the second `+1` from the same starting value
-   is rejected at the server.
+   so even two real clients racing past both their local locks and
+   the transaction OCC cannot oversell the raid — the second `+1`
+   from the same starting value is rejected at the server.
 
 The `tryJoin` flow returns a `JoinOutcome` enum:
 
@@ -378,7 +406,10 @@ keyboard a dedicated workspace.
 snapshot listener on the shard's `messages` sub-collection with
 `.orderBy('createdAt').limitToLast(50)`. The `limitToLast(50)` is the
 cost-control surface: a session's read budget is bounded regardless
-of total message volume.
+of total message volume. The stream itself is captured once in
+`ChatBox` as `late final _chatStream = widget.watchChat(userId: ...)`
+so that a `setState` (e.g. showing/clearing the inline error banner)
+reuses the existing subscription instead of re-running the query.
 
 **Send — WhatsApp-style optimistic.** Tapping send (or hitting enter)
 clears the input *immediately* and dispatches the write through
@@ -450,8 +481,9 @@ AuthGate.initState
 
 HomeScreen.initState
   ↓ injector.newBossCountdownController().start()
-       ├── subscribes events/world_boss
-       └── Timer.periodic(100ms) ticking ValueNotifier<Duration>
+       └── subscribes events/world_boss
+           (Timer.periodic(100ms) starts lazily on first snapshot,
+            ticking a StreamController<Duration>.broadcast())
 
 HomeScreen.initState
   ↓ Caches AppBar + WorldBossTimer + RaidJoinButton + ChatBox in
@@ -460,17 +492,18 @@ HomeScreen.initState
     one never invalidates the others' compositor layers.
 
 HomeScreen.build
-  ├── WorldBossTimer(remaining: notifier)
-  │     └── RepaintBoundary > ValueListenableBuilder > digits text
+  ├── WorldBossTimer(controller)
+  │     └── RepaintBoundary > StreamBuilder<Duration> > digits text
   ├── RaidJoinButton(joinRaid, watchRaidState, userId)
-  │     └── StreamBuilder<RaidState>(events/dragon_raid.snapshots)
+  │     └── StreamBuilder<RaidState>(_raidStateStream, cached once)
   │           └── on tap → JoinRaid → FirestoreRaidRepository.tryJoin
-  │                  ↓ await _serialization
-  │                  ↓ _raidRef.get(); cap check
-  │                  ↓ _joinerRef.get(); double-join check
-  │                  ↓ _raidRef.update({slots_filled: + 1})
-  │                  ↓ _joinerRef.set({userId, joinedAt})
-  │                  ↓ turn.complete()  releases next caller
+  │                  ↓ await _serialization        (in-process mutex)
+  │                  ↓ runTransaction:             (Firestore OCC)
+  │                  │     ↓ _raidRef.get(); cap check
+  │                  │     ↓ _joinerRef.get(); double-join check
+  │                  │     ↓ update slots_filled with increment(1)
+  │                  │     ↓ set joiners/{uid}
+  │                  ↓ completer.complete()        releases next caller
   └── ChatBox(watchChat, sendMessage, userId,
               onComposerTap: _openChatScreen)
         ├── StreamBuilder over limitToLast(50)
@@ -642,8 +675,21 @@ cheap:
 - **Local ticking.** The boss timer reads one document once per
   session. The 100 ms tick is `DateTime.now()` arithmetic; zero
   network cost per tick.
+- **Lazy ticker start.** `Timer.periodic(100ms)` is created on the
+  first boss snapshot rather than at `start()`. Observable behaviour
+  is unchanged (`_emit` short-circuits while `_endTime == null`
+  anyway), but no wake-ups are burnt between app launch and the first
+  Firestore delivery.
+- **Cached stream subscriptions.** Stream-producing use cases
+  (`watchRaidState`, `watchChat`) return a fresh `_snapshots()`
+  listener on every call. The presentation layer captures them once
+  in `late final` State fields (`_raidStateStream`, `_chatStream`),
+  so a `setState` rebuild reuses the existing `StreamBuilder`
+  subscription instead of unsubscribing and re-subscribing to
+  Firestore. Each saved re-subscription is one fewer initial read
+  billed to the project.
 - **Targeted rebuilds.** Every rebuild scope is the smallest possible
-  subtree. `ValueListenableBuilder` rebuilds digits only;
+  subtree. `StreamBuilder` rebuilds digits only;
   `RepaintBoundary` isolates the repaint into its own compositor
   layer; `AnimatedBuilder` caches subtrees that don't change
   per-frame via the `child` parameter.
@@ -668,9 +714,21 @@ cheap:
 - **Optimistic send.** Chat write goes through `unawaited(...)` so
   the UI never blocks on the Firestore round-trip — no spinner, no
   disabled state. Failures are caught and restore the input.
+- **`kDebugMode`-gated logging.** Every per-snapshot and
+  per-transaction `debugPrint` in the data layer is wrapped in
+  `if (kDebugMode)`. `debugPrint` is a no-op in release, but the
+  interpolated string argument is still constructed; gating eliminates
+  that allocation in production builds, including the per-snapshot
+  `_warnIfMalformedKeys` key-iteration in the world-boss repository.
+- **Slim dependency surface.** Only `cupertino_icons`, the three
+  FlutterFire packages (`firebase_core`, `firebase_auth`,
+  `cloud_firestore`), and the Flutter SDK itself are shipped in the
+  release binary; nine previously-listed packages (notably
+  `firebase_messaging` and its native plugin glue) were commented out
+  in `pubspec.yaml` after a static check confirmed zero imports.
 - **No state-management framework overhead.** Direct
-  `StreamBuilder` / `FutureBuilder` / `ValueListenableBuilder` —
-  zero reflection, zero broadcasting infrastructure.
+  `StreamBuilder` / `FutureBuilder` — zero reflection, zero
+  broadcasting infrastructure.
 
 ---
 
@@ -808,4 +866,4 @@ deliverable" to "production feature":
 
 ---
 
-*Last updated: 2026-05-17*
+*Last updated: 2026-05-20*
