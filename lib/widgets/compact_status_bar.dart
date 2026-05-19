@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../core/colors/colors.dart';
@@ -14,7 +13,9 @@ class CompactStatusBar extends StatefulWidget {
     required this.userId,
   });
 
-  final ValueListenable<Duration> remaining;
+  /// Live stream of `firebase_end_time - DateTime.now()` from
+  /// [BossCountdownController].
+  final Stream<Duration> remaining;
   final JoinRaid joinRaid;
   final WatchRaidState watchRaidState;
   final String userId;
@@ -81,9 +82,12 @@ class _CompactStatusBarState extends State<CompactStatusBar> {
                   ),
                   const SizedBox(width: 10),
                   Expanded(
-                    child: ValueListenableBuilder<Duration>(
-                      valueListenable: widget.remaining,
-                      builder: (BuildContext _, Duration value, _) {
+                    child: StreamBuilder<Duration>(
+                      stream: widget.remaining,
+                      initialData: Duration.zero,
+                      builder:
+                          (BuildContext _, AsyncSnapshot<Duration> snap) {
+                        final Duration value = snap.data ?? Duration.zero;
                         return Text(
                           _format(value),
                           maxLines: 1,

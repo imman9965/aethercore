@@ -1,18 +1,24 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+
 import '../../../core/colors/colors.dart';
 import '../../../widgets/live_pulse.dart';
+import 'boss_countdown_controller.dart';
 
+/// Live 10 Hz countdown card.
+///
+/// Binds to `controller.remaining` (a `Stream<Duration>` emitting
+/// `boss_end_time - DateTime.now()` every 100 ms) via [StreamBuilder].
+/// Wrapped in a `RepaintBoundary` upstream so only this card's digits
+/// repaint at 10 Hz — siblings (raid, chat) keep their composited layers.
 class WorldBossTimer extends StatelessWidget {
-  const WorldBossTimer({super.key, required this.remaining});
+  const WorldBossTimer({super.key, required this.controller});
 
-  final ValueListenable<Duration> remaining;
+  final BossCountdownController controller;
 
   @override
   Widget build(BuildContext context) {
     return RepaintBoundary(
       child: Container(
-        // margin: const EdgeInsets.all(12),
         padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 24),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(24),
@@ -60,7 +66,7 @@ class WorldBossTimer extends StatelessWidget {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: <Widget>[
-                    LivePulse(),
+                    const LivePulse(),
                     const SizedBox(width: 8),
                     Text(
                       'WORLD BOSS',
@@ -74,9 +80,12 @@ class WorldBossTimer extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 14),
-                ValueListenableBuilder<Duration>(
-                  valueListenable: remaining,
-                  builder: (BuildContext _, Duration value, _) {
+                StreamBuilder<Duration>(
+                  stream: controller.remaining,
+                  initialData: Duration.zero,
+                  builder:
+                      (BuildContext _, AsyncSnapshot<Duration> snap) {
+                    final Duration value = snap.data ?? Duration.zero;
                     return Text(
                       _format(value),
                       style: TextStyle(
@@ -90,8 +99,8 @@ class WorldBossTimer extends StatelessWidget {
                         ],
                         shadows: <Shadow>[
                           Shadow(
-                            color:
-                                AppColors.kAccentCyan.withValues(alpha: 0.55),
+                            color: AppColors.kAccentCyan
+                                .withValues(alpha: 0.55),
                             blurRadius: 22,
                           ),
                         ],
@@ -124,5 +133,3 @@ class WorldBossTimer extends StatelessWidget {
     return '$mm:$ss.$ds';
   }
 }
-
-

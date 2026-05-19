@@ -1,94 +1,85 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+
 import '../domain/entities/world_boss.dart';
 import '../domain/usecases/watch_world_boss.dart';
 
-
+/// Stream-based boss countdown controller — strictly Firebase-backed.
+///
+/// Pipeline:
+///   Firestore stream (events/world_boss) ─► _endTime cache
+///   Timer.periodic(100 ms) ─► emits (endTime − now()) on `remaining`
+///   StreamBuilder<Duration> rebuilds the digits at 10 Hz
+///
+/// No synthetic fallback. Until Firestore delivers a valid
+/// `boss_end_time`, the stream emits nothing and the UI shows the
+/// `StreamBuilder`'s `initialData` (00:00.0). This matches the
+/// Project Aether brief — the timer is Firestore-driven.
 final class BossCountdownController {
   BossCountdownController({required WatchWorldBoss watchWorldBoss})
       : _watchWorldBoss = watchWorldBoss;
 
   final WatchWorldBoss _watchWorldBoss;
 
-  static const Duration _tickInterval = Duration(milliseconds: 100);
+  static const Duration _tick = Duration(milliseconds: 100);
 
-  /// If Firestore stays silent for this long after [start], seed a
-  /// synthetic end-time so the timer always animates. A real snapshot
-  /// arriving later overrides the synthetic value transparently.
-  static const Duration _fallbackGrace = Duration(seconds: 3);
-
-  /// Synthetic countdown length when the fallback fires.
-  static const Duration _fallbackCountdown = Duration(minutes: 5);
-
-  final ValueNotifier<Duration> _remaining =
-      ValueNotifier<Duration>(Duration.zero);
+  final StreamController<Duration> _remainingCtrl =
+      StreamController<Duration>.broadcast();
 
   DateTime? _endTime;
   Timer? _ticker;
-  Timer? _fallbackTimer;
-  StreamSubscription<WorldBoss>? _subscription;
+  StreamSubscription<WorldBoss>? _sub;
 
-  /// Live countdown duration. Bind via `ValueListenableBuilder`.
-  ValueListenable<Duration> get remaining => _remaining;
+  /// Live countdown stream. Emits `firebase_end_time − DateTime.now()`
+  /// at 10 Hz once the repository has delivered a valid `WorldBoss`.
+  /// Clamped at `Duration.zero` once the boss-end moment has passed.
+  Stream<Duration> get remaining => _remainingCtrl.stream;
 
   /// Begin streaming the boss state and ticking the local countdown.
   /// Idempotent — subsequent calls are no-ops.
   void start() {
-    if (_subscription != null) {
-      return;
-    }
+    if (_sub != null) return;
+
     debugPrint('[boss] start() — subscribing to events/world_boss');
-    _subscription = _watchWorldBoss().listen(
-      _onBoss,
-      onError: (Object error, StackTrace stackTrace) {
-        debugPrint('[boss] STREAM ERROR: $error');
-      },
+
+    _sub = _watchWorldBoss().listen(
+      _onBossUpdate,
+      onError: (Object e, StackTrace s) =>
+          debugPrint('[boss] STREAM ERROR: $e'),
     );
-    _ticker = Timer.periodic(_tickInterval, _onTick);
-    // Fallback so the timer always animates even if Firestore is silent.
-    _fallbackTimer = Timer(_fallbackGrace, _seedFallbackIfNeeded);
+
+    _ticker = Timer.periodic(_tick, (_) => _emit());
   }
 
-  void _seedFallbackIfNeeded() {
-    if (_endTime != null) {
-      return;
-    }
-    final DateTime synthetic = DateTime.now().add(_fallbackCountdown);
+  void _onBossUpdate(WorldBoss boss) {
     debugPrint(
-      '[boss] FALLBACK — no snapshot in ${_fallbackGrace.inSeconds}s, '
-      'using synthetic endTime=$synthetic',
+      '[boss] snapshot received — ${boss.bossName} endTime=${boss.endTime}',
     );
-    _endTime = synthetic;
-    _onTick(_ticker);
-  }
-
-  void _onBoss(WorldBoss boss) {
-    debugPrint('[boss] snapshot received — endTime=${boss.endTime}');
     _endTime = boss.endTime;
-    // Real data wins. Cancel any pending fallback.
-    _fallbackTimer?.cancel();
-    _fallbackTimer = null;
-    _onTick(_ticker);
+    _emit();
   }
 
-  void _onTick(Timer? _) {
+  /// Computes `firebase_end_time − DateTime.now()` and pushes onto the
+  /// stream. No-op while no end-time is known yet — UI sticks at
+  /// initialData (00:00.0) until Firestore delivers.
+  void _emit() {
     final DateTime? endTime = _endTime;
-    if (endTime == null) {
-      return;
+    if (endTime == null) return;
+
+    final Duration diff = endTime.difference(DateTime.now());
+    final Duration value = diff.isNegative ? Duration.zero : diff;
+    if (!_remainingCtrl.isClosed) {
+      _remainingCtrl.add(value);
     }
-    _remaining.value = WorldBoss(endTime: endTime)
-        .remainingFrom(DateTime.now());
   }
 
-  /// Tears down the subscription, ticker, and notifier. Must be called
-  /// from the host widget's `dispose()`.
+  /// Tears down the subscription, ticker, and stream.
+  /// Must be called from the host widget's `dispose()`.
   Future<void> dispose() async {
     _ticker?.cancel();
     _ticker = null;
-    _fallbackTimer?.cancel();
-    _fallbackTimer = null;
-    await _subscription?.cancel();
-    _subscription = null;
-    _remaining.dispose();
+    await _sub?.cancel();
+    _sub = null;
+    await _remainingCtrl.close();
   }
 }

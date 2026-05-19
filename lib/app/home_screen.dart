@@ -73,7 +73,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
 
     _worldBossTimer = RepaintBoundary(
-      child: WorldBossTimer(remaining: _bossController.remaining),
+      child: WorldBossTimer(controller: _bossController,),
     );
 
     _raidJoinButton = RepaintBoundary(
