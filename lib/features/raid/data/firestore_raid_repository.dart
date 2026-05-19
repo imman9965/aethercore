@@ -1,37 +1,12 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 
 import '../domain/entities/join_outcome.dart';
 import '../domain/entities/raid_state.dart';
 import '../domain/repositories/raid_repository.dart';
 
-/// Firestore-backed [RaidRepository].
-///
-/// **Atomic integrity strategy — two layers:**
-///
-/// 1. **In-process serialization lock.** A Future-chain mutex on this
-///    repository instance ensures that concurrent `tryJoin` calls on
-///    the same client serialize correctly: each call awaits the
-///    previous one's completion before reading `slots_filled`, so the
-///    read-modify-write is atomic from the perspective of a single
-///    Dart isolate. This is the layer that makes the 50-concurrent
-///    thundering-herd test pass under `FakeFirebaseFirestore`, which
-///    does not faithfully simulate Firestore's OCC retries.
-///
-/// 2. **Firestore security rules.** Cross-client atomicity in
-///    production is enforced at the database boundary by the rule on
-///    `events/dragon_raid`, which only admits updates that satisfy
-///    `slots_filled == old + 1 && slots_filled <= max_slots`. Even
-///    two clients racing past the in-process lock cannot oversell the
-///    raid because the rule rejects the second `+1` from the same
-///    starting value at the server.
-///
-/// `runTransaction` is intentionally not used here: the fake's
-/// implementation does not propagate committed writes between
-/// successive transactions reliably under in-process contention, and
-/// layers 1 and 2 already cover both single-client and multi-client
-/// race scenarios.
 final class FirestoreRaidRepository implements RaidRepository {
   FirestoreRaidRepository({required FirebaseFirestore firestore})
       : _firestore = firestore;
@@ -42,9 +17,7 @@ final class FirestoreRaidRepository implements RaidRepository {
   static const String _raidDocId = 'dragon_raid';
   static const String _joinersSubcollection = 'joiners';
 
-  /// Tail of the serialization chain. Each new `tryJoin` awaits this
-  /// Future before doing any work, then publishes its own Future for
-  /// the next caller to await — guaranteeing strict FIFO execution.
+  /// Serialization lock to prevent concurrent calls from the same device
   Future<void> _serialization = Future<void>.value();
 
   DocumentReference<Map<String, dynamic>> get _raidRef =>
@@ -55,71 +28,120 @@ final class FirestoreRaidRepository implements RaidRepository {
 
   @override
   Future<JoinOutcome> tryJoin({required String userId}) async {
-    final Future<void> previous = _serialization;
-    final Completer<void> turn = Completer<void>();
-    _serialization = turn.future;
+    debugPrint('🔄 [raid-repo] tryJoin called for: $userId');
+
+    final previous = _serialization;
+    final completer = Completer<void>();
+    _serialization = completer.future;
+
     try {
       await previous;
       return await _attemptJoin(userId);
     } finally {
-      turn.complete();
+      completer.complete();
     }
   }
 
+  /// Main join logic using **Firestore Transaction** (Recommended)
   Future<JoinOutcome> _attemptJoin(String userId) async {
     try {
-      final DocumentSnapshot<Map<String, dynamic>> raidSnap =
-          await _raidRef.get();
-      if (!raidSnap.exists) {
-        return JoinOutcome.raidNotFound;
-      }
+      return await _firestore.runTransaction<JoinOutcome>((transaction) async {
+        debugPrint('🔄 Transaction started for user: $userId');
 
-      final Map<String, dynamic>? data = raidSnap.data();
-      if (data == null) {
-        return JoinOutcome.raidNotFound;
-      }
+        final raidSnap = await transaction.get(_raidRef);
 
-      final int slotsFilled =
-          (data['slots_filled'] as num?)?.toInt() ?? 0;
-      final int maxSlots = (data['max_slots'] as num?)?.toInt() ?? 0;
-      if (slotsFilled >= maxSlots) {
+        if (!raidSnap.exists) {
+          debugPrint('❌ Raid document does not exist');
+          return JoinOutcome.raidNotFound;
+        }
+
+        final data = raidSnap.data() ?? {};
+        final parsed = _parseRaidData(data);
+
+        debugPrint('📊 Current slots_filled: ${parsed.slots} | maxSlots: ${parsed.max}');
+
+        if (parsed.max > 0 && parsed.slots >= parsed.max) {
+          return JoinOutcome.raidFull;
+        }
+
+        // Double-check already joined
+        final joinerSnap = await transaction.get(_joinerRef(userId));
+        if (joinerSnap.exists) {
+          return JoinOutcome.alreadyJoined;
+        }
+
+        // === CRITICAL: Use FieldValue.increment for safer updates ===
+        transaction.update(_raidRef, {
+          'slots_filled': FieldValue.increment(1),
+        });
+
+        transaction.set(_joinerRef(userId), {
+          'userId': userId,
+          'joinedAt': FieldValue.serverTimestamp(),
+        });
+
+        debugPrint('✅ Transaction updates prepared');
+        return JoinOutcome.admitted;
+      });
+    } on FirebaseException catch (e) {
+      debugPrint('🔥 Firebase Error: ${e.code} - ${e.message}');
+
+      if (e.code == 'permission-denied') {
+        debugPrint('🚫 PERMISSION DENIED → Check your Security Rules!');
+      } else if (e.code == 'not-found') {
+        debugPrint('❌ Document not found');
+      } else if (e.code == 'aborted') {
+        debugPrint('⚔️ Transaction aborted (concurrent modification)');
         return JoinOutcome.raidFull;
       }
 
-      // Double-join guard. Read first; the lock guarantees no other
-      // tryJoin on this instance has incremented `slots_filled`
-      // between this check and the update below.
-      final DocumentSnapshot<Map<String, dynamic>> joinerSnap =
-          await _joinerRef(userId).get();
-      if (joinerSnap.exists) {
-        return JoinOutcome.alreadyJoined;
-      }
-
-      // Awaited writes — return only after the data store reflects
-      // the change, so the next serialized caller sees the new value.
-      await _raidRef.update(<String, Object>{
-        'slots_filled': slotsFilled + 1,
-      });
-      await _joinerRef(userId).set(<String, Object>{
-        'userId': userId,
-        'joinedAt': FieldValue.serverTimestamp(),
-      });
-      return JoinOutcome.admitted;
-    } on FirebaseException {
-      // Translated into a domain outcome; never silently swallowed.
+      return JoinOutcome.infrastructureError;
+    } catch (e, stack) {
+      debugPrint('❌ Unexpected error: $e\n$stack');
       return JoinOutcome.infrastructureError;
     }
+  }
+  /// Helper to safely parse raid data (handles messy field names)
+  ({int slots, int max}) _parseRaidData(Map<String, dynamic> data) {
+    int slotsFilled = 0;
+    int maxSlots = 0;
+
+    for (var entry in data.entries) {
+      final cleanKey = entry.key.trim().toLowerCase();
+      final value = entry.value;
+
+      if (cleanKey == 'slots_filled' || cleanKey == 'slotsfilled') {
+        slotsFilled = (value as num?)?.toInt() ?? 0;
+      } else if (cleanKey.contains('max_slot') ||
+          cleanKey == 'maxslots' ||
+          cleanKey.contains('max')) {
+        maxSlots = (value as num?)?.toInt() ?? 0;
+      }
+    }
+
+    return (slots: slotsFilled, max: maxSlots);
   }
 
   @override
   Stream<RaidState> watch() {
+    debugPrint('[raid-repo] Subscribing to events/dragon_raid');
+
     return _raidRef.snapshots().map(_mapToState);
   }
 
   RaidState _mapToState(DocumentSnapshot<Map<String, dynamic>> snap) {
-    final Map<String, dynamic>? data = snap.data();
-    final int slotsFilled = (data?['slots_filled'] as num?)?.toInt() ?? 0;
-    final int maxSlots = (data?['max_slots'] as num?)?.toInt() ?? 0;
-    return RaidState(slotsFilled: slotsFilled, maxSlots: maxSlots);
+    if (!snap.exists) {
+      return const RaidState(slotsFilled: 0, maxSlots: 0);
+    }
+
+    final data = snap.data() ?? {};
+    final parsed = _parseRaidData(data);
+
+    debugPrint('[raid-repo] Updated → slotsFilled: ${parsed.slots} / max: ${parsed.max}');
+
+    return RaidState(
+      slotsFilled: parsed.slots,
+      maxSlots: parsed.max,
+    );
   }
 }

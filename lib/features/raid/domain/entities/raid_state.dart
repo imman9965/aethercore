@@ -10,7 +10,7 @@ final class RaidState {
 
   final int slotsFilled;
   final int maxSlots;
-
   bool get isFull => slotsFilled >= maxSlots;
   int get slotsRemaining => maxSlots - slotsFilled;
+
 }

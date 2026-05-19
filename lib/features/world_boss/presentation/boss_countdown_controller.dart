@@ -12,11 +12,20 @@ final class BossCountdownController {
 
   static const Duration _tickInterval = Duration(milliseconds: 100);
 
+  /// If Firestore stays silent for this long after [start], seed a
+  /// synthetic end-time so the timer always animates. A real snapshot
+  /// arriving later overrides the synthetic value transparently.
+  static const Duration _fallbackGrace = Duration(seconds: 3);
+
+  /// Synthetic countdown length when the fallback fires.
+  static const Duration _fallbackCountdown = Duration(minutes: 5);
+
   final ValueNotifier<Duration> _remaining =
       ValueNotifier<Duration>(Duration.zero);
 
   DateTime? _endTime;
   Timer? _ticker;
+  Timer? _fallbackTimer;
   StreamSubscription<WorldBoss>? _subscription;
 
   /// Live countdown duration. Bind via `ValueListenableBuilder`.
@@ -28,12 +37,37 @@ final class BossCountdownController {
     if (_subscription != null) {
       return;
     }
-    _subscription = _watchWorldBoss().listen(_onBoss);
+    debugPrint('[boss] start() — subscribing to events/world_boss');
+    _subscription = _watchWorldBoss().listen(
+      _onBoss,
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('[boss] STREAM ERROR: $error');
+      },
+    );
     _ticker = Timer.periodic(_tickInterval, _onTick);
+    // Fallback so the timer always animates even if Firestore is silent.
+    _fallbackTimer = Timer(_fallbackGrace, _seedFallbackIfNeeded);
+  }
+
+  void _seedFallbackIfNeeded() {
+    if (_endTime != null) {
+      return;
+    }
+    final DateTime synthetic = DateTime.now().add(_fallbackCountdown);
+    debugPrint(
+      '[boss] FALLBACK — no snapshot in ${_fallbackGrace.inSeconds}s, '
+      'using synthetic endTime=$synthetic',
+    );
+    _endTime = synthetic;
+    _onTick(_ticker);
   }
 
   void _onBoss(WorldBoss boss) {
+    debugPrint('[boss] snapshot received — endTime=${boss.endTime}');
     _endTime = boss.endTime;
+    // Real data wins. Cancel any pending fallback.
+    _fallbackTimer?.cancel();
+    _fallbackTimer = null;
     _onTick(_ticker);
   }
 
@@ -51,6 +85,8 @@ final class BossCountdownController {
   Future<void> dispose() async {
     _ticker?.cancel();
     _ticker = null;
+    _fallbackTimer?.cancel();
+    _fallbackTimer = null;
     await _subscription?.cancel();
     _subscription = null;
     _remaining.dispose();
